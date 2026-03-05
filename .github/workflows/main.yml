@@ -1,20 +1,28 @@
 name: Iran News Auto Update
 on:
+  workflow_dispatch: # 수동 실행 버튼
   schedule:
     - cron: '0 * * * *' # 매시간 실행
-  workflow_dispatch: # 수동 실행 버튼
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install gspread google-auth requests beautifulsoup4
+
       - name: Run script
         env:
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
         run: |
-          pip install gspread google-auth requests beautifulsoup4
+          ls -R # 현재 폴더에 어떤 파일이 있는지 로그에 찍어보기 (확인용)
           python main.py
