@@ -12,10 +12,10 @@ CRITICAL_KEYWORDS = [
     'power', 'refinery', 'infrastructure', 'electricity', 'outage', 'grid', 'blackout'
 ]
 
+
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
 def filter_content(title, text):
-    """Checks if any critical keyword exists in title or body text."""
     combined = (title + " " + text).lower()
     return any(word in combined for word in CRITICAL_KEYWORDS)
 
@@ -25,14 +25,23 @@ def get_guardian_live():
         url = "https://www.theguardian.com/world/iran"
         res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
-        article = soup.select_one('a[data-link-name="article"]')
-        if article:
-            title = article.get_text().strip()
-            link = article['href']
-            if filter_content(title, ""):
-                return [["The Guardian", title, link]]
-    except Exception as e: print(f"⚠️ Guardian Error: {e}")
-    return []
+        
+        results = []
+        # Guardian Live Blog blocks
+        blocks = soup.select('div[id^="block-"]') or soup.find_all('article')
+        for b in blocks[:5]:
+            title = b.find('h2').get_text().strip() if b.find('h2') else "Breaking Update"
+            link_tag = b.find('a', class_='block-share__item--twitter') # Example link fallback
+            link = link_tag['href'] if link_tag else url
+            
+            # Extract Article Timestamp
+            time_tag = b.find('time')
+            article_time = time_tag.get_text().strip() if time_tag else "Unknown Time"
+            
+            if filter_content(title, b.get_text()):
+                results.append(["The Guardian", article_time, title, link])
+        return results
+    except Exception as e: print(f"⚠️ Guardian Error: {e}"); return []
 
 def get_bbc_middle_east():
     print("🔎 Scanning BBC Middle East...")
@@ -40,66 +49,74 @@ def get_bbc_middle_east():
         url = "https://www.bbc.com/news/world/middle_east"
         res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
-        # Find headlines in h2/h3
-        articles = soup.find_all(['h2', 'h3'])[:5]
+        
         results = []
+        # Finding articles in the list
+        articles = soup.select('div[data-testid="curated-article-card"]') or soup.find_all(['h2', 'h3'])[:5]
         for a in articles:
-            title = a.get_text().strip()
+            headline = a.find(['h2', 'h3']) or a
+            title = headline.get_text().strip()
             link_tag = a.find_parent('a') or a.find('a')
             link = link_tag['href'] if link_tag else url
             if not link.startswith('http'): link = "https://www.bbc.com" + link
+            
+            # BBC Time extraction (usually in a span or time tag)
+            time_tag = a.find('span', {'data-testid': 'card-metadata-lastupdated'}) or a.find('time')
+            article_time = time_tag.get_text().strip() if time_tag else "Recent"
+            
             if filter_content(title, ""):
-                results.append(["BBC News", title, link])
+                results.append(["BBC News", article_time, title, link])
         return results
-    except Exception as e: print(f"⚠️ BBC Error: {e}")
-    return []
+    except Exception as e: print(f"⚠️ BBC Error: {e}"); return []
 
 def get_cnn_live_updates():
-    # Today's specific live URL provided by Dayoung
     url = "https://edition.cnn.com/world/live-news/iran-war-us-israel-trump-03-05-26"
     print(f"🔎 Scanning CNN Live: {url}")
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
-        posts = soup.find_all('article') # Individual live update blocks
+        posts = soup.find_all('article')
+        
         results = []
-        for post in posts[:10]: # Check latest 10 posts
+        for post in posts[:10]:
             headline = post.find('h2')
             if headline:
                 title = headline.get_text().strip()
-                content = post.get_text().strip()
-                if filter_content(title, content):
-                    results.append(["CNN Live", title, url])
+                # CNN Live post time is often in a specific span
+                time_tag = post.find('span', class_='sc-') or post.find('time')
+                article_time = time_tag.get_text().strip() if time_tag else "Live"
+                
+                if filter_content(title, post.get_text()):
+                    results.append(["CNN Live", article_time, title, url])
         return results
-    except Exception as e: print(f"⚠️ CNN Error: {e}")
-    return []
+    except Exception as e: print(f"⚠️ CNN Error: {e}"); return []
 
 try:
-    # 1. Connect to Google Sheets
+    # 1. Google Sheets Auth
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(os.environ["GSPREAD_CREDENTIALS"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     sheet = client.open("Iran_Monitoring").sheet1
-    print("✅ Connected to Google Sheets")
 
-    # 2. Collect News from all sources
+    # 2. Collect News
     all_news = get_guardian_live() + get_bbc_middle_east() + get_cnn_live_updates()
     
-    # 3. Deduplication & Insertion
-    existing_titles = sheet.col_values(3) # Check the "Title" column
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 3. Deduplication (By checking the Title column in the sheet)
+    existing_titles = sheet.col_values(4) # Check the 4th column (Title)
+    bot_run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     added_count = 0
 
     for news in all_news:
-        if news[1] not in existing_titles:
-            # Row format: [Time, Source, Title, URL]
-            sheet.insert_row([now, news[0], news[1], news[2]], 2)
-            print(f"🚨 Critical Event Logged: [{news[0]}] {news[1][:40]}...")
+        source, article_time, title, link = news
+        if title not in existing_titles:
+            # Format: [Bot Run Time, Article Post Time, Source, Title, Link]
+            sheet.insert_row([bot_run_time, article_time, source, title, link], 2)
+            print(f"📝 New Alert: [{source}] {title[:30]}")
             added_count += 1
-            if added_count >= 10: break # Safety limit per run
+            if added_count >= 10: break
 
-    print(f"🎉 Task Finished. Total {added_count} new critical updates added.")
+    print(f"🎉 Task Complete. Added {added_count} new updates.")
 
 except Exception as e:
-    print(f"❌ Critical System Error: {e}")
+    print(f"❌ Error: {e}")
